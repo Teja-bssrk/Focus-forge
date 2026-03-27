@@ -645,15 +645,13 @@ def list_sessions(viewer_id=None, subject=None, time_slot=None, session_date=Non
         if viewer:
             session.update(score_for_user(viewer, session))
             session["join_allowed"] = (
-                session["is_live"]
+                session["is_active"]
                 and not session["is_member"]
                 and subject_match(session["subject"], viewer.get("subjects", []))
                 and session["participants_count"] < session["max_participants"]
             )
             if session["is_upcoming"]:
                 session["tag"] = "Starts later"
-            elif not session["is_live"] and session["status"] == "active":
-                session["tag"] = "Join window closed"
         sessions.append(session)
     connection.close()
     return sessions
@@ -710,7 +708,7 @@ def create_session(user_id, subject, schedule, duration_minutes, max_participant
     cursor.execute(
         """
         INSERT INTO members (session_id, user_id, is_host, mic_on, camera_on, hand_up, screen_sharing, mic_allowed, camera_allowed)
-        VALUES (?, ?, 1, 1, 1, 0, 0, 1, 1)
+        VALUES (?, ?, 1, 1, 0, 0, 0, 1, 1)
         """,
         (session_id, user_id),
     )
@@ -728,10 +726,6 @@ def join_session(user_id, session_id):
         return session, None
     if not session["is_active"]:
         return None, session["end_note"] or "Session expired."
-    if session["is_upcoming"]:
-        return None, "You can join only when the session start time matches the current system time."
-    if not session["is_live"]:
-        return None, "Join window closed for this session."
     if not subject_match(session["subject"], user.get("subjects", [])):
         return None, "Subject mismatch."
     if session["participants_count"] >= session["max_participants"]:
@@ -742,7 +736,7 @@ def join_session(user_id, session_id):
     cursor.execute(
         """
         INSERT INTO members (session_id, user_id, is_host, mic_on, camera_on, hand_up, screen_sharing, mic_allowed, camera_allowed)
-        VALUES (?, ?, 0, 1, 1, 0, 0, 1, 1)
+        VALUES (?, ?, 0, 1, 0, 0, 0, 1, 1)
         """,
         (session_id, user_id),
     )

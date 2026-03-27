@@ -28,7 +28,6 @@ const state = {
         screenStream: null,
         error: "",
         warningShown: false,
-        autoVideoRooms: new Set(),
     },
     rtc: {
         peers: {},
@@ -1165,27 +1164,6 @@ async function syncLocalMedia(room) {
         await ensureScreenShareStream();
     }
 
-    if (
-        stream &&
-        room.is_live &&
-        room.viewer.camera_allowed &&
-        !room.viewer.screen_sharing &&
-        !room.viewer.camera_on &&
-        !state.media.autoVideoRooms.has(room.id)
-    ) {
-        state.media.autoVideoRooms.add(room.id);
-        try {
-            const data = await api(`/api/sessions/${room.id}/room/self`, {
-                method: "POST",
-                data: { camera_on: true },
-            });
-            renderRoom(data.room, state.activeView === "room");
-            return;
-        } catch (error) {
-            console.error(error);
-        }
-    }
-
     if (!stream) {
         if ((cameraEnabled || micEnabled) && room?.id) {
             try {
@@ -1256,7 +1234,7 @@ function renderRoom(room, focusRoom = false) {
     const banner = byId("roomBanner");
     banner.textContent = room.is_live
         ? "Session active. Camera, mic, and screen-share controls are live on this portal."
-        : (room.is_upcoming ? "Session created. Join becomes available only when system time reaches the start time." : (room.end_note || "Session expired."));
+        : (room.is_upcoming ? "Session scheduled. Members can join early and wait for the start time." : (room.end_note || "Session expired."));
     banner.className = `banner ${room.is_active ? "active-banner" : "expired-banner"}`;
 
     const endButton = byId("endSessionButton");
@@ -1411,7 +1389,7 @@ function renderRoom(room, focusRoom = false) {
     const banner = byId("roomBanner");
     banner.textContent = room.is_live
         ? "Session active. Camera, mic, and screen-share controls are live on this portal."
-        : (room.is_upcoming ? "Session created. Join becomes available only when system time reaches the start time." : (room.end_note || "Session expired."));
+        : (room.is_upcoming ? "Session scheduled. Members can join early and wait for the start time." : (room.end_note || "Session expired."));
     banner.className = `banner ${room.is_active ? "active-banner" : "expired-banner"}`;
 
     const endButton = byId("endSessionButton");
