@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: focus-forge
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 120
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_PATH
+        value: /var/data/focus_forge.db
+      - key: SESSION_COOKIE_SECURE
+        value: "1"
+      - key: FLASK_DEBUG
+        value: "0"
+    disk:
+      name: focus-forge-data
+      mountPath: /var/data
+      sizeGB: 1

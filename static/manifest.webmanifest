@@ -1,0 +1,10 @@
+{
+  "name": "Focus Forge",
+  "short_name": "Forge",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#030812",
+  "theme_color": "#06111f",
+  "description": "Focus Forge is a study session portal with matching, rooms, badges, and live session controls.",
+  "icons": []
+}

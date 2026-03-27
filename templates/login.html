@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#06111f">
+    <title>{{ config.app_name }}</title>
+    <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body data-page="auth">
+    <script>window.FORGE_CONFIG = {{ config|tojson }};</script>
+
+    <main class="auth-wrap">
+        <section class="auth-showcase">
+            <p class="eyebrow">{{ config.app_name }}</p>
+            <h1>Build stronger study sessions, not random ones.</h1>
+            <p class="lede">
+                A brand-new study collaboration website with precise time-slot matching, custom subjects,
+                mood-aware pairing, and a forged session room for hackathon demos.
+            </p>
+            <div class="showcase-grid">
+                <article class="mini-panel">
+                    <h2>Match Lab</h2>
+                    <p>Compatible by subject, slot, mood, and role.</p>
+                </article>
+                <article class="mini-panel">
+                    <h2>Room Controls</h2>
+                    <p>Mic, camera, hand raise, kick, mute, and end session.</p>
+                </article>
+                <article class="mini-panel">
+                    <h2>Fast Demo</h2>
+                    <p>Simple Flask + SQLite stack. No heavy setup.</p>
+                </article>
+            </div>
+        </section>
+
+        <section class="auth-panel">
+            <div class="tab-strip">
+                <button type="button" class="tab active" data-tab="login">Login</button>
+                <button type="button" class="tab" data-tab="signup">Create Account</button>
+            </div>
+
+            <div id="authAlert" class="alerts"></div>
+
+            <form id="loginForm" class="glass-card form-stack">
+                <h2>Welcome back</h2>
+                <label class="field">
+                    <span>Email or username</span>
+                    <input type="text" name="identity" required>
+                </label>
+                <label class="field">
+                    <span>Password</span>
+                    <input type="password" name="password" required>
+                </label>
+                <button class="btn btn-primary" type="submit">Enter Forge</button>
+            </form>
+
+            <form id="signupForm" class="glass-card form-stack hidden">
+                <h2>Create your forge</h2>
+                <div class="grid two">
+                    <label class="field">
+                        <span>Display name</span>
+                        <input type="text" name="display_name" required>
+                    </label>
+                    <label class="field">
+                        <span>Username</span>
+                        <input type="text" name="username" required>
+                    </label>
+                </div>
+
+                <div class="grid two">
+                    <label class="field">
+                        <span>Email</span>
+                        <input type="email" name="email" required>
+                    </label>
+                    <label class="field">
+                        <span>Password</span>
+                        <input type="password" name="password" required>
+                    </label>
+                </div>
+
+                <label class="field">
+                    <span>Subjects</span>
+                    <input type="text" name="subjects" placeholder="AI, DBMS, Physics, Java" required>
+                </label>
+
+                <div class="field">
+                    <span>Time slots</span>
+                    <div class="slot-grid" id="authSlots"></div>
+                </div>
+
+                <div class="grid two">
+                    <label class="field">
+                        <span>Mood</span>
+                        <select name="mood">
+                            {% for mood in config.moods %}
+                            <option value="{{ mood.key }}">{{ mood.key }} - {{ mood.description }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                    <label class="field">
+                        <span>Role</span>
+                        <select name="role">
+                            {% for role in config.roles %}
+                            <option value="{{ role }}">{{ role }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                </div>
+
+                <button class="btn btn-primary" type="submit">Create Account</button>
+            </form>
+        </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+    <script>
+        if ("serviceWorker" in navigator) {
+            window.addEventListener("load", () => navigator.serviceWorker.register("{{ url_for('static', filename='sw.js') }}"));
+        }
+    </script>
+</body>
+</html>

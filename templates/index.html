@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#06111f">
+    <title>{{ config.app_name }} Dashboard</title>
+    <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body data-page="dashboard">
+    <script>window.FORGE_CONFIG = {{ config|tojson }};</script>
+
+    <div class="app-shell">
+        <aside class="rail">
+            <div class="rail-brand">
+                <p class="eyebrow">{{ config.app_name }}</p>
+                <h1>Forge your best study room.</h1>
+            </div>
+
+            <nav class="rail-nav">
+                <button class="rail-link active" data-view="overview">Overview</button>
+                <button class="rail-link" data-view="progress">Track Progress</button>
+                <button class="rail-link" data-view="profile">Profile</button>
+                <button class="rail-link" data-view="matchlab">Match Lab</button>
+                <button class="rail-link" data-view="achievements">Achievements</button>
+                <button class="rail-link" data-view="create">Create Session</button>
+                <button class="rail-link" data-view="browse">Browse Sessions</button>
+                <button class="rail-link" data-view="mine">My Sessions</button>
+                <button class="rail-link" data-view="room">Room</button>
+                <button class="rail-link danger" id="logoutButton">Logout</button>
+            </nav>
+
+            <div class="rail-foot glass-card">
+                <span class="muted">Signed in</span>
+                <strong id="userName">-</strong>
+                <span id="userHandle">-</span>
+            </div>
+        </aside>
+
+        <main class="workspace">
+            <header class="workspace-head">
+                <div>
+                    <p class="eyebrow">Dashboard Sections</p>
+                    <h2 id="viewTitle">Overview</h2>
+                </div>
+                <div class="head-pills">
+                    <span class="pill" id="completionPill">Profile 0%</span>
+                    <span class="pill" id="roomPill">No room</span>
+                </div>
+            </header>
+
+            <div id="appAlert" class="alerts"></div>
+            <div id="roomDock" class="room-dock hidden"></div>
+
+            <section class="view" id="view-overview">
+                <article class="glass-card hero-banner">
+                    <p class="eyebrow" id="welcomeEyebrow">Welcome</p>
+                    <h3 id="welcomeHeadline">Welcome</h3>
+                    <p id="welcomeCopy">Your study dashboard is ready.</p>
+                </article>
+                <div class="stat-grid" id="overviewStats"></div>
+                <div class="dual-grid">
+                    <article class="glass-card">
+                        <div class="section-head">
+                            <div>
+                                <h3>Recommended Sessions</h3>
+                                <p>Best current fit for your saved profile.</p>
+                            </div>
+                        </div>
+                        <div id="recommendations" class="stack"></div>
+                    </article>
+                    <article class="glass-card">
+                        <div class="section-head">
+                            <div>
+                                <h3>Quick Identity</h3>
+                                <p>Your saved subjects, slots, mood, and role.</p>
+                            </div>
+                        </div>
+                        <div id="identitySummary" class="chip-row"></div>
+                    </article>
+                </div>
+            </section>
+
+            <section class="view hidden" id="view-progress">
+                <div class="stat-grid" id="progressStats"></div>
+                <div class="dual-grid">
+                    <article class="glass-card">
+                        <div class="section-head">
+                            <div>
+                                <h3>Weekly & Monthly Activity</h3>
+                                <p>Sessions, topics learned, and study time tracked from completed rooms.</p>
+                            </div>
+                        </div>
+                        <div id="progressBreakdown" class="achievement-grid"></div>
+                    </article>
+                    <article class="glass-card">
+                        <div class="section-head">
+                            <div>
+                                <h3>Recent Sessions</h3>
+                                <p>Your most recent completed study sessions.</p>
+                            </div>
+                        </div>
+                        <div id="progressHistory" class="stack"></div>
+                    </article>
+                </div>
+            </section>
+
+            <section class="view hidden" id="view-profile">
+                <form id="profileForm" class="glass-card form-stack">
+                    <div class="section-head">
+                        <div>
+                            <h3>Profile</h3>
+                            <p>Edit your account and matching preferences.</p>
+                        </div>
+                        <button class="btn btn-primary" type="submit">Save</button>
+                    </div>
+
+                    <div class="grid two">
+                        <label class="field">
+                            <span>Display name</span>
+                            <input type="text" name="display_name" required>
+                        </label>
+                        <label class="field">
+                            <span>Username</span>
+                            <input type="text" name="username" required>
+                        </label>
+                    </div>
+
+                    <div class="grid two">
+                        <label class="field">
+                            <span>Email</span>
+                            <input type="email" name="email" required>
+                        </label>
+                        <label class="field">
+                            <span>New password</span>
+                            <input type="password" name="password" placeholder="Optional">
+                        </label>
+                    </div>
+
+                    <label class="field">
+                        <span>Subjects</span>
+                        <input type="text" name="subjects" required>
+                    </label>
+
+                    <div class="grid two">
+                        <label class="field">
+                            <span>Mood</span>
+                            <select name="mood">
+                                {% for mood in config.moods %}
+                                <option value="{{ mood.key }}">{{ mood.key }} - {{ mood.description }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label class="field">
+                            <span>Role</span>
+                            <select name="role">
+                                {% for role in config.roles %}
+                                <option value="{{ role }}">{{ role }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                    </div>
+                </form>
+
+                <article class="glass-card profile-feedback-card">
+                    <div class="section-head">
+                        <div>
+                            <h3>Community Reputation</h3>
+                            <p>Ratings, reviews, and reports received from past session participants.</p>
+                        </div>
+                    </div>
+
+                    <div class="feedback-summary-grid" id="profileFeedbackStats"></div>
+
+                    <div class="dual-grid feedback-dual-grid">
+                        <div class="glass-panel">
+                            <h4>Recent Reviews</h4>
+                            <div id="profileReviews" class="feedback-feed"></div>
+                        </div>
+                        <div class="glass-panel">
+                            <h4>Recent Reports</h4>
+                            <div id="profileReports" class="feedback-feed"></div>
+                        </div>
+                    </div>
+                </article>
+            </section>
+
+            <section class="view hidden" id="view-matchlab">
+                <article class="glass-card">
+                    <div class="section-head">
+                        <div>
+                            <h3>Match Lab</h3>
+                            <p>See why sessions match you and trigger a live radar scan.</p>
+                        </div>
+                        <button class="btn btn-primary" type="button" id="matchNowButton">Match Me Now</button>
+                    </div>
+                    <div class="match-radar-shell">
+                        <div class="radar-stage" id="matchRadar">
+                            <div class="radar-ring ring-1"></div>
+                            <div class="radar-ring ring-2"></div>
+                            <div class="radar-ring ring-3"></div>
+                            <div class="radar-sweep"></div>
+                            <div class="radar-core">SCAN</div>
+                        </div>
+                        <div class="match-reveal glass-panel" id="matchReveal">
+                            <h4>Best match waiting</h4>
+                            <p>Run the radar to reveal your strongest live session fit.</p>
+                        </div>
+                    </div>
+                    <div id="matchLabList" class="stack"></div>
+                </article>
+            </section>
+
+            <section class="view hidden" id="view-achievements">
+                <div class="stat-grid" id="achievementStats"></div>
+                <article class="glass-card">
+                    <div class="section-head">
+                        <div>
+                            <h3>Badges & Achievement Points</h3>
+                            <p>Simple hackathon-friendly progress rewards based on real app usage.</p>
+                        </div>
+                    </div>
+                    <div id="achievementList" class="achievement-grid"></div>
+                </article>
+            </section>
+
+            <section class="view hidden" id="view-create">
+                <form id="sessionForm" class="glass-card form-stack">
+                    <div class="section-head">
+                        <div>
+                            <h3>Create Session</h3>
+                            <p>Launch a fresh room on the new localhost build.</p>
+                        </div>
+                        <button class="btn btn-primary" type="submit">Create</button>
+                    </div>
+
+                    <div class="grid two">
+                        <label class="field">
+                            <span>Subject</span>
+                            <input type="text" name="subject" required>
+                        </label>
+                        <label class="field">
+                            <span>Session date</span>
+                            <input type="date" name="session_date" required>
+                        </label>
+                    </div>
+
+                    <div class="grid two">
+                        <label class="field">
+                            <span>Start time</span>
+                            <input type="time" name="session_time" required>
+                        </label>
+                        <div class="glass-panel schedule-panel">
+                            <span class="muted">Auto day + time preview</span>
+                            <strong id="schedulePreview">Choose a date and time</strong>
+                            <small>Participants can join only from the session start time until the session end time.</small>
+                        </div>
+                    </div>
+
+                    <div class="grid four">
+                        <label class="field">
+                            <span>Duration</span>
+                            <input type="number" name="duration_minutes" min="15" max="240" value="60" required>
+                        </label>
+                        <label class="field">
+                            <span>Max participants</span>
+                            <input type="number" name="max_participants" min="2" max="12" value="4" required>
+                        </label>
+                        <label class="field">
+                            <span>Mood</span>
+                            <select name="mood">
+                                {% for mood in config.moods %}
+                                <option value="{{ mood.key }}">{{ mood.key }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label class="field">
+                            <span>Role</span>
+                            <select name="role">
+                                {% for role in config.roles %}
+                                <option value="{{ role }}">{{ role }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                    </div>
+                </form>
+                <article class="glass-card">
+                    <div class="section-head">
+                        <div>
+                            <h3>Floating Session Preview</h3>
+                            <p>When there are several sessions, they drift like a live portal lane.</p>
+                        </div>
+                    </div>
+                    <div id="createPreview" class="stack"></div>
+                </article>
+            </section>
+
+            <section class="view hidden" id="view-browse">
+                <article class="glass-card">
+                    <div class="section-head">
+                        <div>
+                            <h3>Browse Sessions</h3>
+                            <p>Join sessions that fit your saved slots and subjects.</p>
+                        </div>
+                    </div>
+                    <form id="filterForm" class="filter-row">
+                        <label class="field">
+                            <span>Subject</span>
+                            <input type="text" name="subject">
+                        </label>
+                        <label class="field">
+                            <span>Session date</span>
+                            <input type="date" name="session_date">
+                        </label>
+                        <label class="field">
+                            <span>Start time</span>
+                            <input type="time" name="session_time">
+                        </label>
+                        <button class="btn btn-secondary" type="submit">Apply</button>
+                        <button class="btn btn-secondary" type="button" id="clearFilters">Clear</button>
+                    </form>
+                    <div id="browseList" class="stack"></div>
+                </article>
+            </section>
+
+            <section class="view hidden" id="view-mine">
+                <article class="glass-card">
+                    <div class="section-head">
+                        <div>
+                            <h3>My Sessions</h3>
+                            <p>Your joined and hosted rooms.</p>
+                        </div>
+                    </div>
+                    <div id="mineList" class="stack"></div>
+                </article>
+            </section>
+
+            <section class="view hidden" id="view-room">
+                <article class="glass-card">
+                    <div class="section-head">
+                        <div>
+                            <h3 id="roomTitle">Room</h3>
+                            <p id="roomMeta">Open a session to use room controls.</p>
+                        </div>
+                        <div class="head-pills">
+                            <span class="pill" id="roomTimer">00:00</span>
+                            <button class="btn btn-danger" id="endSessionButton" type="button">End Session</button>
+                        </div>
+                    </div>
+
+                    <div id="roomBanner" class="banner">No active room selected.</div>
+
+                    <div class="room-grid">
+                        <div class="glass-panel">
+                            <h4>Your Controls</h4>
+                            <div class="chip-row" id="selfControls"></div>
+                            <div class="participant-grid" id="participants"></div>
+                        </div>
+                        <div class="glass-panel">
+                            <h4>Session Chat</h4>
+                            <div id="messages" class="messages"></div>
+                            <form id="chatForm" class="chat-row">
+                                <input type="text" name="body" placeholder="Message the room">
+                                <button class="btn btn-primary" type="submit">Send</button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <div class="feedback-room-grid">
+                        <article class="glass-panel">
+                            <div class="section-head">
+                                <div>
+                                    <h4>Profile Spotlight</h4>
+                                    <p>Open any participant profile to inspect ratings, reviews, and reports.</p>
+                                </div>
+                            </div>
+                            <div id="profileSpotlight" class="profile-spotlight">
+                                <div class="banner info-banner">Select a participant to view their profile reputation.</div>
+                            </div>
+                        </article>
+
+                        <article class="glass-panel">
+                            <div class="section-head">
+                                <div>
+                                    <h4>Session Feedback</h4>
+                                    <p>After a session ends, hosts and participants can leave a rating, review, or report.</p>
+                                </div>
+                            </div>
+                            <form id="feedbackForm" class="form-stack compact-form">
+                                <input type="hidden" name="target_user_id">
+                                <div class="banner info-banner" id="feedbackTargetMeta">Select a participant from the room.</div>
+                                <div class="grid two">
+                                    <label class="field">
+                                        <span>Rating</span>
+                                        <select name="rating">
+                                            <option value="5">5 Stars</option>
+                                            <option value="4">4 Stars</option>
+                                            <option value="3">3 Stars</option>
+                                            <option value="2">2 Stars</option>
+                                            <option value="1">1 Star</option>
+                                        </select>
+                                    </label>
+                                    <label class="field">
+                                        <span>Report reason</span>
+                                        <input type="text" name="reason" placeholder="Spam, rude behavior, no show">
+                                    </label>
+                                </div>
+                                <label class="field">
+                                    <span>Review</span>
+                                    <textarea name="review_text" rows="4" placeholder="Share what this person did well or what could improve."></textarea>
+                                </label>
+                                <div class="chip-row">
+                                    <button class="btn btn-primary" type="submit" data-feedback-submit="review">Submit Review</button>
+                                    <button class="btn btn-secondary" type="submit" data-feedback-submit="report">Submit Report</button>
+                                </div>
+                            </form>
+                        </article>
+                    </div>
+                </article>
+            </section>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+    <script>
+        if ("serviceWorker" in navigator) {
+            window.addEventListener("load", () => navigator.serviceWorker.register("{{ url_for('static', filename='sw.js') }}"));
+        }
+    </script>
+</body>
+</html>
