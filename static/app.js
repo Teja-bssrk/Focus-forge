@@ -1,4 +1,12 @@
 const cfg = window.FORGE_CONFIG || { time_slots: [], moods: [], roles: [], poll_ms: 2000 };
+const APP_TIMEZONE = "Asia/Kolkata";
+const APP_UTC_OFFSET = "+05:30";
+const RTC_CONFIG = {
+    iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" },
+    ],
+};
 
 const state = {
     user: null,
@@ -20,6 +28,11 @@ const state = {
         screenStream: null,
         error: "",
         warningShown: false,
+    },
+    rtc: {
+        peers: {},
+        signalAfterId: 0,
+        signalPollHandle: null,
     },
 };
 
@@ -59,6 +72,18 @@ async function api(url, options = {}) {
     return data;
 }
 
+function remoteVideoId(userId) {
+    return `remoteVideo-${userId}`;
+}
+
+function remoteFallbackId(userId) {
+    return `remoteFallback-${userId}`;
+}
+
+function remoteStatusId(userId) {
+    return `remoteStatus-${userId}`;
+}
+
 function parseSubjects(raw) {
     return String(raw || "")
         .split(",")
@@ -77,10 +102,26 @@ function formatCountdown(seconds) {
     return `${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
 }
 
+function parseIstDateTime(raw) {
+    const value = String(raw || "").trim();
+    if (!value) return null;
+    const normalized = value.includes("T") ? value : value.replace(" ", "T");
+    const withSeconds = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(normalized) ? `${normalized}:00` : normalized;
+    const parsed = new Date(`${withSeconds}${APP_UTC_OFFSET}`);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function formatIstDateTime(raw, options) {
+    const parsed = parseIstDateTime(raw);
+    if (!parsed) return raw;
+    return parsed.toLocaleString("en-IN", {
+        timeZone: APP_TIMEZONE,
+        ...options,
+    });
+}
+
 function formatMessageTime(raw) {
-    const parsed = new Date(String(raw).replace(" ", "T"));
-    if (Number.isNaN(parsed.getTime())) return raw;
-    return parsed.toLocaleString([], {
+    return formatIstDateTime(raw, {
         month: "short",
         day: "numeric",
         hour: "numeric",
@@ -89,9 +130,7 @@ function formatMessageTime(raw) {
 }
 
 function formatFeedbackDate(raw) {
-    const parsed = new Date(String(raw).replace(" ", "T"));
-    if (Number.isNaN(parsed.getTime())) return raw;
-    return parsed.toLocaleString([], {
+    return formatIstDateTime(raw, {
         month: "short",
         day: "numeric",
         hour: "numeric",
@@ -137,18 +176,19 @@ function updateSchedulePreview() {
         preview.textContent = "Choose a date and time";
         return;
     }
-    const localDate = new Date(`${dateValue}T${timeValue}`);
-    if (Number.isNaN(localDate.getTime())) {
+    const localDate = parseIstDateTime(`${dateValue} ${timeValue}:00`);
+    if (!localDate) {
         preview.textContent = "Choose a valid date and time";
         return;
     }
-    preview.textContent = localDate.toLocaleString([], {
+    preview.textContent = localDate.toLocaleString("en-IN", {
+        timeZone: APP_TIMEZONE,
         weekday: "long",
         month: "short",
         day: "numeric",
         hour: "numeric",
         minute: "2-digit",
-    });
+    }) + " IST";
 }
 
 function animateCounters(container) {
@@ -692,6 +732,36 @@ function stopPolling() {
     }
 }
 
+function stopSignalPolling() {
+    if (state.rtc.signalPollHandle) {
+        clearInterval(state.rtc.signalPollHandle);
+        state.rtc.signalPollHandle = null;
+    }
+}
+
+function cleanupRtcPeer(userId) {
+    const peer = state.rtc.peers[userId];
+    if (!peer) return;
+    try {
+        peer.pc.ontrack = null;
+        peer.pc.onicecandidate = null;
+        peer.pc.onnegotiationneeded = null;
+        peer.pc.close();
+    } catch (error) {
+        console.error(error);
+    }
+    delete state.rtc.peers[userId];
+    const video = byId(remoteVideoId(userId));
+    if (video) video.srcObject = null;
+}
+
+function cleanupRtc() {
+    stopSignalPolling();
+    Object.keys(state.rtc.peers).forEach((userId) => cleanupRtcPeer(Number(userId)));
+    state.rtc.peers = {};
+    state.rtc.signalAfterId = 0;
+}
+
 function releaseLocalMedia() {
     if (state.media.stream) {
         state.media.stream.getTracks().forEach((track) => track.stop());
@@ -700,6 +770,241 @@ function releaseLocalMedia() {
     if (state.media.screenStream) {
         state.media.screenStream.getTracks().forEach((track) => track.stop());
         state.media.screenStream = null;
+    }
+    Object.values(state.rtc.peers).forEach((peer) => {
+        peer.pc.getSenders().forEach((sender) => {
+            try {
+                sender.replaceTrack(null);
+            } catch (error) {
+                console.error(error);
+            }
+        });
+    });
+}
+
+async function sendRtcSignal(sessionId, recipientUserId, signalType, payload) {
+    return api(`/api/sessions/${sessionId}/signals`, {
+        method: "POST",
+        data: {
+            recipient_user_id: recipientUserId,
+            signal_type: signalType,
+            payload,
+        },
+    });
+}
+
+function attachRemoteStream(userId, peer, member) {
+    const video = byId(remoteVideoId(userId));
+    const fallback = byId(remoteFallbackId(userId));
+    const status = byId(remoteStatusId(userId));
+    const liveVideo = Boolean(peer?.stream?.getVideoTracks().some((track) => track.readyState === "live"));
+    const liveAudio = Boolean(peer?.stream?.getAudioTracks().some((track) => track.readyState === "live"));
+    if (video) {
+        video.srcObject = liveVideo || liveAudio ? peer.stream : null;
+        video.autoplay = true;
+        video.playsInline = true;
+        video.classList.toggle("hidden-preview", !liveVideo);
+        if (liveVideo || liveAudio) video.play().catch(() => {});
+    }
+    if (fallback) fallback.classList.toggle("hidden", liveVideo);
+    if (status) {
+        if (liveVideo && member?.screen_sharing) status.textContent = "Live shared screen";
+        else if (liveVideo) status.textContent = "Live audio/video feed";
+        else if (liveAudio) status.textContent = "Live audio feed";
+        else if (member?.screen_sharing) status.textContent = "Connecting shared screen...";
+        else if (member?.camera_on || member?.mic_on) status.textContent = "Connecting live feed...";
+        else status.textContent = "Camera and mic are off";
+    }
+}
+
+async function getOutgoingTracks(room) {
+    if (!room?.viewer || room.viewer.user_id !== state.user?.id || !room.is_live) {
+        return { audioTrack: null, videoTrack: null };
+    }
+
+    let mediaStream = null;
+    let audioTrack = null;
+    let videoTrack = null;
+
+    if (room.viewer.screen_sharing && state.media.screenStream) {
+        videoTrack = state.media.screenStream.getVideoTracks()[0] || null;
+        if (room.viewer.mic_on && room.viewer.mic_allowed) {
+            mediaStream = await ensureLocalMedia();
+            audioTrack = mediaStream?.getAudioTracks()[0] || null;
+        }
+        return { audioTrack, videoTrack };
+    }
+
+    if (room.viewer.camera_allowed || room.viewer.mic_allowed) {
+        mediaStream = await ensureLocalMedia();
+    }
+    if (room.viewer.camera_on && room.viewer.camera_allowed) {
+        videoTrack = mediaStream?.getVideoTracks()[0] || null;
+    }
+    if (room.viewer.mic_on && room.viewer.mic_allowed) {
+        audioTrack = mediaStream?.getAudioTracks()[0] || null;
+    }
+    return { audioTrack, videoTrack };
+}
+
+async function syncPeerTracks(peer, room) {
+    const { audioTrack, videoTrack } = await getOutgoingTracks(room);
+    const senders = peer.pc.getSenders();
+    const audioSender = senders.find((sender) => sender.track?.kind === "audio" || sender.__kind === "audio");
+    const videoSender = senders.find((sender) => sender.track?.kind === "video" || sender.__kind === "video");
+
+    if (audioTrack) {
+        if (audioSender) await audioSender.replaceTrack(audioTrack);
+        else {
+            const sender = peer.pc.addTrack(audioTrack, state.media.stream);
+            sender.__kind = "audio";
+        }
+    } else if (audioSender) {
+        await audioSender.replaceTrack(null);
+    }
+
+    const videoSourceStream = state.media.screenStream || state.media.stream;
+    if (videoTrack) {
+        if (videoSender) await videoSender.replaceTrack(videoTrack);
+        else {
+            const sender = peer.pc.addTrack(videoTrack, videoSourceStream);
+            sender.__kind = "video";
+        }
+    } else if (videoSender) {
+        await videoSender.replaceTrack(null);
+    }
+}
+
+function ensureRtcPeer(room, member) {
+    if (!window.RTCPeerConnection || !room?.is_live || !member || member.user_id === state.user?.id) return null;
+    if (state.rtc.peers[member.user_id]) return state.rtc.peers[member.user_id];
+
+    const peer = {
+        userId: member.user_id,
+        polite: state.user.id > member.user_id,
+        makingOffer: false,
+        ignoreOffer: false,
+        stream: new MediaStream(),
+        pc: new RTCPeerConnection(RTC_CONFIG),
+    };
+
+    peer.pc.ontrack = (event) => {
+        event.streams[0].getTracks().forEach((track) => {
+            const exists = peer.stream.getTracks().some((item) => item.id === track.id);
+            if (!exists) peer.stream.addTrack(track);
+        });
+        const latestMember = (state.room?.members || []).find((item) => item.user_id === member.user_id) || member;
+        attachRemoteStream(member.user_id, peer, latestMember);
+    };
+
+    peer.pc.onicecandidate = (event) => {
+        if (!event.candidate || !state.room?.id) return;
+        sendRtcSignal(state.room.id, member.user_id, "candidate", event.candidate.toJSON ? event.candidate.toJSON() : event.candidate).catch((error) => {
+            console.error(error);
+        });
+    };
+
+    peer.pc.onconnectionstatechange = () => {
+        if (["failed", "closed", "disconnected"].includes(peer.pc.connectionState)) {
+            attachRemoteStream(member.user_id, peer, member);
+        }
+    };
+
+    peer.pc.onnegotiationneeded = async () => {
+        try {
+            peer.makingOffer = true;
+            await syncPeerTracks(peer, state.room);
+            await peer.pc.setLocalDescription();
+            await sendRtcSignal(state.room.id, member.user_id, peer.pc.localDescription.type, peer.pc.localDescription);
+        } catch (error) {
+            console.error(error);
+        } finally {
+            peer.makingOffer = false;
+        }
+    };
+
+    state.rtc.peers[member.user_id] = peer;
+    attachRemoteStream(member.user_id, peer, member);
+    return peer;
+}
+
+async function handleRtcSignal(room, signal) {
+    const member = (room.members || []).find((item) => item.user_id === signal.sender_user_id);
+    if (!member) return;
+    const peer = ensureRtcPeer(room, member);
+    if (!peer) return;
+
+    if (signal.signal_type === "candidate") {
+        if (!signal.payload || peer.ignoreOffer) return;
+        try {
+            await peer.pc.addIceCandidate(signal.payload);
+        } catch (error) {
+            console.error(error);
+        }
+        return;
+    }
+
+    if (!["offer", "answer"].includes(signal.signal_type) || !signal.payload) return;
+    const description = signal.payload;
+    const offerCollision = description.type === "offer" && (peer.makingOffer || peer.pc.signalingState !== "stable");
+    peer.ignoreOffer = !peer.polite && offerCollision;
+    if (peer.ignoreOffer) return;
+
+    try {
+        await peer.pc.setRemoteDescription(description);
+        if (description.type === "offer") {
+            await syncPeerTracks(peer, room);
+            await peer.pc.setLocalDescription();
+            await sendRtcSignal(room.id, member.user_id, peer.pc.localDescription.type, peer.pc.localDescription);
+        }
+    } catch (error) {
+        console.error(error);
+    }
+}
+
+async function pollRtcSignals(sessionId) {
+    if (!state.room?.is_live || state.room.id !== sessionId) return;
+    try {
+        const data = await api(`/api/sessions/${sessionId}/signals?after_id=${state.rtc.signalAfterId}`);
+        const signals = data.signals || [];
+        if (signals.length) {
+            state.rtc.signalAfterId = signals[signals.length - 1].id;
+            for (const signal of signals) {
+                await handleRtcSignal(state.room, signal);
+            }
+        }
+    } catch (error) {
+        console.error(error);
+    }
+}
+
+function startSignalPolling(sessionId) {
+    stopSignalPolling();
+    state.rtc.signalAfterId = 0;
+    state.rtc.signalPollHandle = setInterval(() => {
+        pollRtcSignals(sessionId);
+    }, 1000);
+    pollRtcSignals(sessionId);
+}
+
+async function syncRtcPeers(room) {
+    if (!window.RTCPeerConnection || !room?.is_live) {
+        cleanupRtc();
+        return;
+    }
+
+    const activeIds = new Set((room.members || []).filter((member) => member.user_id !== state.user?.id).map((member) => member.user_id));
+    Object.keys(state.rtc.peers).forEach((userId) => {
+        if (!activeIds.has(Number(userId))) cleanupRtcPeer(Number(userId));
+    });
+
+    for (const member of room.members || []) {
+        if (member.user_id === state.user?.id) continue;
+        const peer = ensureRtcPeer(room, member);
+        if (peer) {
+            await syncPeerTracks(peer, room);
+            attachRemoteStream(member.user_id, peer, member);
+        }
     }
 }
 
@@ -813,6 +1118,7 @@ async function syncLocalMedia(room) {
         else previewState.textContent = "Camera is off";
     }
     if (meter) meter.classList.toggle("active", micEnabled);
+    await syncRtcPeers(room);
 }
 
 function renderRoom(room, focusRoom = false) {
@@ -823,7 +1129,9 @@ function renderRoom(room, focusRoom = false) {
 
     byId("roomTitle").textContent = `${room.subject} Room`;
     byId("roomMeta").textContent = `${formatSessionDateLabel(room)} | ${room.duration_label} | Host ${room.host_name}`;
-    byId("roomTimer").textContent = formatCountdown(room.remaining_seconds);
+    byId("roomTimer").textContent = room.is_live
+        ? `Ends in ${formatCountdown(room.remaining_seconds)}`
+        : (room.is_upcoming ? `Starts in ${formatCountdown(room.remaining_seconds)}` : "Ended");
 
     const banner = byId("roomBanner");
     banner.textContent = room.is_live
@@ -834,6 +1142,9 @@ function renderRoom(room, focusRoom = false) {
     const endButton = byId("endSessionButton");
     endButton.style.display = room.viewer?.is_host ? "inline-flex" : "none";
     endButton.disabled = !room.is_active;
+    const leaveButton = byId("roomLeaveButton");
+    leaveButton.style.display = room.viewer?.is_host ? "none" : "inline-flex";
+    leaveButton.disabled = !room.is_active;
     updateFeedbackTarget(room);
 
     const micLabel = !room.viewer?.mic_allowed ? "Mic Blocked" : (room.viewer?.mic_on ? "Mic On" : "Mic Off");
@@ -851,10 +1162,9 @@ function renderRoom(room, focusRoom = false) {
             ${screenLabel}
         </button>
         <button class="chip portal-chip ${room.viewer?.hand_up ? "active" : ""}" type="button" data-self="hand" ${room.is_live ? "" : "disabled"}>
-            ${room.viewer?.hand_up ? "Hand Up" : "Raise Hand"}
+            ${room.viewer?.hand_up ? "✋ Hand Up" : "✋ Raise Hand"}
         </button>
         <span class="mic-meter ${room.viewer?.mic_on && room.viewer?.mic_allowed && room.is_live ? "active" : ""}" id="micMeter">Mic Signal</span>
-        <button class="chip portal-chip" type="button" data-self="leave">Leave</button>
     `;
 
     byId("participants").innerHTML = room.members.map((member) => {
@@ -874,10 +1184,12 @@ function renderRoom(room, focusRoom = false) {
             </div>
         ` : `
             <div class="participant-screen">
-                <div>
+                <video id="${remoteVideoId(member.user_id)}" class="local-preview hidden-preview" autoplay playsinline></video>
+                <div class="screen-fallback" id="${remoteFallbackId(member.user_id)}">
                     <strong>${escapeHtml(initials)}</strong>
                     <span>${escapeHtml(member.display_name)}</span>
                 </div>
+                <div class="screen-status" id="${remoteStatusId(member.user_id)}">${member.screen_sharing ? "Waiting for shared screen" : (member.camera_on || member.mic_on ? "Waiting for live feed" : "Camera and mic are off")}</div>
             </div>
         `;
 
@@ -913,7 +1225,7 @@ function renderRoom(room, focusRoom = false) {
                     ${member.screen_sharing ? '<span class="chip accent-chip">Sharing Screen</span>' : ""}
                     <span class="chip">${member.mic_on ? "Mic On" : "Mic Off"}</span>
                     <span class="chip">${member.camera_on ? "Cam On" : "Cam Off"}</span>
-                    <span class="chip">${member.hand_up ? "Hand Up" : "Hand Down"}</span>
+                    <span class="chip">${member.hand_up ? "✋ Hand Up" : "✋ Hand Down"}</span>
                     <span class="chip">${member.mic_allowed ? "Mic Enabled" : "Mic Locked"}</span>
                     <span class="chip">${member.camera_allowed ? "Cam Enabled" : "Cam Locked"}</span>
                     <span class="chip">${escapeHtml(member.role)}</span>
@@ -941,18 +1253,25 @@ function renderRoom(room, focusRoom = false) {
     if (messages) messages.scrollTop = messages.scrollHeight;
 
     syncLocalMedia(room);
+    Object.values(state.rtc.peers).forEach((peer) => {
+        const member = (room.members || []).find((item) => item.user_id === peer.userId);
+        if (member) attachRemoteStream(peer.userId, peer, member);
+    });
 }
 
 async function openRoom(sessionId, focusRoom = true) {
     const data = await api(`/api/sessions/${sessionId}/room`);
+    cleanupRtc();
     renderRoom(data.room, focusRoom);
     stopPolling();
+    startSignalPolling(sessionId);
     state.pollHandle = setInterval(async () => {
         try {
             const fresh = await api(`/api/sessions/${sessionId}/room`);
             renderRoom(fresh.room, false);
         } catch (error) {
             stopPolling();
+            cleanupRtc();
         }
     }, cfg.poll_ms || 2000);
 }
@@ -1030,6 +1349,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     byId("logoutButton").addEventListener("click", async () => {
         releaseLocalMedia();
         stopPolling();
+        cleanupRtc();
         const data = await api("/api/logout", { method: "POST" });
         window.location.href = data.redirect;
     });
@@ -1132,6 +1452,7 @@ document.addEventListener("DOMContentLoaded", async () => {
                     state.roomId = null;
                     releaseLocalMedia();
                     stopPolling();
+                    cleanupRtc();
                     await bootstrap();
                     setView("mine");
                 } else if (action.dataset.action === "end-session") {
@@ -1159,6 +1480,7 @@ document.addEventListener("DOMContentLoaded", async () => {
                     state.roomId = null;
                     releaseLocalMedia();
                     stopPolling();
+                    cleanupRtc();
                     await bootstrap();
                     setView("mine");
                     return;
@@ -1238,6 +1560,22 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
     });
 
+    byId("roomLeaveButton").addEventListener("click", async () => {
+        if (!state.room) return;
+        try {
+            await api(`/api/sessions/${state.room.id}/leave`, { method: "POST" });
+            state.room = null;
+            state.roomId = null;
+            releaseLocalMedia();
+            stopPolling();
+            cleanupRtc();
+            await bootstrap();
+            setView("mine");
+        } catch (error) {
+            alertBox("appAlert", error.message, "error");
+        }
+    });
+
     byId("chatForm").addEventListener("submit", async (event) => {
         event.preventDefault();
         if (!state.room) return;
@@ -1302,6 +1640,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     window.addEventListener("beforeunload", () => {
         releaseLocalMedia();
         stopPolling();
+        cleanupRtc();
     });
 
     byId("matchNowButton")?.addEventListener("click", runMatchRadar);

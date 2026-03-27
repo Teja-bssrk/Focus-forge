@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from logic import normalize_slots, parse_subjects, profile_completeness, schedule_payload, score_for_user, subject_match
+from logic import local_now, localize_datetime, normalize_slots, parse_subjects, profile_completeness, schedule_payload, score_for_user, subject_match
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DATABASE_PATH", os.path.join(BASE_DIR, "focus_forge.db"))
@@ -19,7 +19,7 @@ def get_connection():
 
 
 def _now():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return local_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _to_json(value):
@@ -50,7 +50,7 @@ def _ensure_column(connection, table_name, column_name, definition):
 def _parse_db_datetime(value):
     if not value:
         return None
-    return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+    return localize_datetime(datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S"))
 
 
 def _format_duration_label(minutes):
@@ -230,6 +230,23 @@ def create_tables():
             FOREIGN KEY (session_id) REFERENCES sessions (id),
             FOREIGN KEY (reporter_user_id) REFERENCES users (id),
             FOREIGN KEY (target_user_id) REFERENCES users (id)
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            sender_user_id INTEGER NOT NULL,
+            recipient_user_id INTEGER NOT NULL,
+            signal_type TEXT NOT NULL,
+            payload TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (session_id) REFERENCES sessions (id),
+            FOREIGN KEY (sender_user_id) REFERENCES users (id),
+            FOREIGN KEY (recipient_user_id) REFERENCES users (id)
         )
         """
     )
@@ -415,7 +432,7 @@ def _session_from_row(connection, row, viewer_id=None):
     viewer = next((member for member in members if member["user_id"] == viewer_id), None) if viewer_id else None
     start_at = _parse_db_datetime(item.get("session_start") or item.get("created_at"))
     end_at = _parse_db_datetime(item.get("session_end")) or (start_at + timedelta(minutes=int(item["duration_minutes"])))
-    now = datetime.now()
+    now = local_now()
     remaining = 0
     if item["status"] == "active":
         remaining = max(0, int(((end_at if now >= start_at else start_at) - now).total_seconds()))
@@ -767,6 +784,72 @@ def get_room(session_id, viewer_id):
     return session, None
 
 
+def send_signal(session_id, sender_user_id, recipient_user_id, signal_type, payload):
+    room, error = get_room(session_id, sender_user_id)
+    if error:
+        return None, error
+    if not room["is_live"]:
+        return None, "Media signaling works only while the session is live."
+    if sender_user_id == recipient_user_id:
+        return None, "Signal recipient must be another participant."
+
+    connection = get_connection()
+    if not _session_member_exists(connection, session_id, recipient_user_id):
+        connection.close()
+        return None, "Signal recipient is not in this session."
+
+    cursor = connection.cursor()
+    cursor.execute(
+        """
+        INSERT INTO signals (session_id, sender_user_id, recipient_user_id, signal_type, payload, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (session_id, sender_user_id, recipient_user_id, str(signal_type or "").strip(), json.dumps(payload or {}), _now()),
+    )
+    connection.commit()
+    signal_id = cursor.lastrowid
+    connection.close()
+    return {"id": signal_id}, None
+
+
+def poll_signals(session_id, viewer_user_id, after_id=0):
+    room, error = get_room(session_id, viewer_user_id)
+    if error:
+        return None, error
+
+    connection = get_connection()
+    cursor = connection.cursor()
+    cursor.execute(
+        """
+        SELECT id, sender_user_id, recipient_user_id, signal_type, payload, created_at
+        FROM signals
+        WHERE session_id = ?
+          AND recipient_user_id = ?
+          AND id > ?
+        ORDER BY id ASC
+        """,
+        (session_id, viewer_user_id, int(after_id or 0)),
+    )
+    signals = []
+    for row in cursor.fetchall():
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        signals.append(
+            {
+                "id": row["id"],
+                "sender_user_id": row["sender_user_id"],
+                "recipient_user_id": row["recipient_user_id"],
+                "signal_type": row["signal_type"],
+                "payload": payload,
+                "created_at": row["created_at"],
+            }
+        )
+    connection.close()
+    return signals, None
+
+
 def _session_member_exists(connection, session_id, user_id):
     cursor = connection.cursor()
     cursor.execute("SELECT 1 FROM members WHERE session_id = ? AND user_id = ?", (session_id, user_id))
@@ -997,7 +1080,7 @@ def overview(user_id):
     user = get_user_by_id(user_id)
     browse = list_sessions(viewer_id=user_id, only_active=True)
     mine = list_sessions(viewer_id=user_id, scope="my")
-    now = datetime.now()
+    now = local_now()
     weekly_cutoff = now - timedelta(days=7)
     monthly_cutoff = now - timedelta(days=30)
     recos = []

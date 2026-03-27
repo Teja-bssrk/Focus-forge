@@ -19,7 +19,9 @@ from database import (
     leave_session,
     list_sessions,
     overview,
+    poll_signals,
     register_user,
+    send_signal,
     submit_report,
     submit_review,
     update_self,
@@ -72,7 +74,7 @@ def config_payload():
         "moods": [{"key": key, "description": value} for key, value in MOODS.items()],
         "roles": ROLES,
         "time_slots": TIME_SLOTS,
-        "poll_ms": 2000,
+        "poll_ms": 1000,
     }
 
 
@@ -370,6 +372,35 @@ def api_report(user, session_id, target_user_id):
         user["id"],
         target_user_id,
         payload.get("reason"),
+    )
+    if message:
+        return error(message)
+    return jsonify({"success": True, **result})
+
+
+@app.get("/api/sessions/<int:session_id>/signals")
+@api_login_required
+def api_signals(user, session_id):
+    try:
+        after_id = int(request.args.get("after_id") or 0)
+    except (TypeError, ValueError):
+        after_id = 0
+    signals, message = poll_signals(session_id, user["id"], after_id=after_id)
+    if message:
+        return error(message)
+    return jsonify({"success": True, "signals": signals})
+
+
+@app.post("/api/sessions/<int:session_id>/signals")
+@api_login_required
+def api_send_signal(user, session_id):
+    payload = request.get_json(silent=True) or {}
+    result, message = send_signal(
+        session_id,
+        user["id"],
+        payload.get("recipient_user_id"),
+        payload.get("signal_type"),
+        payload.get("payload"),
     )
     if message:
         return error(message)

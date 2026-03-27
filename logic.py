@@ -1,7 +1,10 @@
+import os
 import re
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 APP_NAME = "Focus Forge"
+APP_TIMEZONE = ZoneInfo(os.environ.get("APP_TIMEZONE", "Asia/Kolkata"))
 
 TIME_SLOTS = [
     {"key": "08:00-09:00", "label": "8:00 AM - 9:00 AM"},
@@ -138,9 +141,19 @@ def build_custom_slot(start, end):
 
 def parse_session_datetime(session_date, session_time):
     try:
-        return datetime.strptime(f"{str(session_date).strip()} {str(session_time).strip()}", "%Y-%m-%d %H:%M")
+        return datetime.strptime(f"{str(session_date).strip()} {str(session_time).strip()}", "%Y-%m-%d %H:%M").replace(tzinfo=APP_TIMEZONE)
     except ValueError:
         return None
+
+
+def local_now():
+    return datetime.now(APP_TIMEZONE)
+
+
+def localize_datetime(value):
+    if not value:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=APP_TIMEZONE)
 
 
 def schedule_payload(session_date, session_time, duration_minutes):
