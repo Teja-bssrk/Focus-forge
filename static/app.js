@@ -28,6 +28,7 @@ const state = {
         screenStream: null,
         error: "",
         warningShown: false,
+        autoVideoRooms: new Set(),
     },
     rtc: {
         peers: {},
@@ -1162,6 +1163,27 @@ async function syncLocalMedia(room) {
 
     if (screenEnabled && !state.media.screenStream) {
         await ensureScreenShareStream();
+    }
+
+    if (
+        stream &&
+        room.is_live &&
+        room.viewer.camera_allowed &&
+        !room.viewer.screen_sharing &&
+        !room.viewer.camera_on &&
+        !state.media.autoVideoRooms.has(room.id)
+    ) {
+        state.media.autoVideoRooms.add(room.id);
+        try {
+            const data = await api(`/api/sessions/${room.id}/room/self`, {
+                method: "POST",
+                data: { camera_on: true },
+            });
+            renderRoom(data.room, state.activeView === "room");
+            return;
+        } catch (error) {
+            console.error(error);
+        }
     }
 
     if (!stream) {

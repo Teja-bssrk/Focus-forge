@@ -710,7 +710,7 @@ def create_session(user_id, subject, schedule, duration_minutes, max_participant
     cursor.execute(
         """
         INSERT INTO members (session_id, user_id, is_host, mic_on, camera_on, hand_up, screen_sharing, mic_allowed, camera_allowed)
-        VALUES (?, ?, 1, 1, 0, 0, 0, 1, 1)
+        VALUES (?, ?, 1, 1, 1, 0, 0, 1, 1)
         """,
         (session_id, user_id),
     )
@@ -742,7 +742,7 @@ def join_session(user_id, session_id):
     cursor.execute(
         """
         INSERT INTO members (session_id, user_id, is_host, mic_on, camera_on, hand_up, screen_sharing, mic_allowed, camera_allowed)
-        VALUES (?, ?, 0, 1, 0, 0, 0, 1, 1)
+        VALUES (?, ?, 0, 1, 1, 0, 0, 1, 1)
         """,
         (session_id, user_id),
     )
