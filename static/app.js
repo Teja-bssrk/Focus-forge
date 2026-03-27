@@ -84,6 +84,10 @@ function remoteStatusId(userId) {
     return `remoteStatus-${userId}`;
 }
 
+function remoteAudioId(userId) {
+    return `remoteAudio-${userId}`;
+}
+
 function parseSubjects(raw) {
     return String(raw || "")
         .split(",")
@@ -753,6 +757,8 @@ function cleanupRtcPeer(userId) {
     delete state.rtc.peers[userId];
     const video = byId(remoteVideoId(userId));
     if (video) video.srcObject = null;
+    const audio = byId(remoteAudioId(userId));
+    if (audio) audio.srcObject = null;
 }
 
 function cleanupRtc() {
@@ -793,18 +799,47 @@ async function sendRtcSignal(sessionId, recipientUserId, signalType, payload) {
     });
 }
 
+async function playMediaElement(element) {
+    if (!element || !element.srcObject) return;
+    try {
+        await element.play();
+    } catch (error) {
+        console.debug("Media autoplay deferred", error);
+    }
+}
+
+function resumeRemoteMediaPlayback() {
+    document.querySelectorAll("video[id^='remoteVideo-'], audio[id^='remoteAudio-']").forEach((element) => {
+        if (element.srcObject) {
+            playMediaElement(element);
+        }
+    });
+}
+
 function attachRemoteStream(userId, peer, member) {
     const video = byId(remoteVideoId(userId));
+    const audio = byId(remoteAudioId(userId));
     const fallback = byId(remoteFallbackId(userId));
     const status = byId(remoteStatusId(userId));
     const liveVideo = Boolean(peer?.stream?.getVideoTracks().some((track) => track.readyState === "live"));
     const liveAudio = Boolean(peer?.stream?.getAudioTracks().some((track) => track.readyState === "live"));
     if (video) {
-        video.srcObject = liveVideo || liveAudio ? peer.stream : null;
+        video.srcObject = liveVideo
+            ? new MediaStream(peer.stream.getVideoTracks().filter((track) => track.readyState === "live"))
+            : null;
+        video.muted = true;
         video.autoplay = true;
         video.playsInline = true;
         video.classList.toggle("hidden-preview", !liveVideo);
-        if (liveVideo || liveAudio) video.play().catch(() => {});
+        if (liveVideo) playMediaElement(video);
+    }
+    if (audio) {
+        audio.srcObject = liveAudio
+            ? new MediaStream(peer.stream.getAudioTracks().filter((track) => track.readyState === "live"))
+            : null;
+        audio.autoplay = true;
+        audio.playsInline = true;
+        if (liveAudio) playMediaElement(audio);
     }
     if (fallback) fallback.classList.toggle("hidden", liveVideo);
     if (status) {
@@ -814,6 +849,34 @@ function attachRemoteStream(userId, peer, member) {
         else if (member?.screen_sharing) status.textContent = "Connecting shared screen...";
         else if (member?.camera_on || member?.mic_on) status.textContent = "Connecting live feed...";
         else status.textContent = "Camera and mic are off";
+    }
+}
+
+function shouldInitiatePeer(member) {
+    return Boolean(state.user?.id) && Boolean(member?.user_id) && state.user.id < member.user_id;
+}
+
+async function createRtcOffer(peer, member, room, force = false) {
+    if (!peer || !member || !room?.id || !room?.is_live) return;
+    if (!force && !shouldInitiatePeer(member)) return;
+    if (peer.makingOffer) return;
+    if (!force && Date.now() - (peer.lastOfferAt || 0) < 800) return;
+    if (peer.pc.signalingState !== "stable") return;
+
+    try {
+        peer.makingOffer = true;
+        await syncPeerTracks(peer, room);
+        if (force && typeof peer.pc.restartIce === "function") {
+            peer.pc.restartIce();
+        }
+        const offer = await peer.pc.createOffer(force ? { iceRestart: true } : undefined);
+        await peer.pc.setLocalDescription(offer);
+        peer.lastOfferAt = Date.now();
+        await sendRtcSignal(room.id, member.user_id, "offer", peer.pc.localDescription.toJSON ? peer.pc.localDescription.toJSON() : peer.pc.localDescription);
+    } catch (error) {
+        console.error(error);
+    } finally {
+        peer.makingOffer = false;
     }
 }
 
@@ -876,6 +939,7 @@ function ensureRtcPeer(room, member) {
         ignoreOffer: false,
         pendingCandidates: [],
         stream: new MediaStream(),
+        lastOfferAt: 0,
         pc: new RTCPeerConnection(RTC_CONFIG),
     };
 
@@ -887,9 +951,15 @@ function ensureRtcPeer(room, member) {
     peer.videoSender = videoTransceiver.sender;
 
     peer.pc.ontrack = (event) => {
-        event.streams[0].getTracks().forEach((track) => {
-            const exists = peer.stream.getTracks().some((item) => item.id === track.id);
-            if (!exists) peer.stream.addTrack(track);
+        if (event.streams && event.streams[0]) {
+            peer.stream = event.streams[0];
+        } else {
+            const exists = peer.stream.getTracks().some((item) => item.id === event.track.id);
+            if (!exists) peer.stream.addTrack(event.track);
+        }
+        event.track.addEventListener("ended", () => {
+            const latestMember = (state.room?.members || []).find((item) => item.user_id === member.user_id) || member;
+            attachRemoteStream(member.user_id, peer, latestMember);
         });
         const latestMember = (state.room?.members || []).find((item) => item.user_id === member.user_id) || member;
         attachRemoteStream(member.user_id, peer, latestMember);
@@ -903,22 +973,23 @@ function ensureRtcPeer(room, member) {
     };
 
     peer.pc.onconnectionstatechange = () => {
-        if (["failed", "closed", "disconnected"].includes(peer.pc.connectionState)) {
-            attachRemoteStream(member.user_id, peer, member);
+        const latestMember = (state.room?.members || []).find((item) => item.user_id === member.user_id) || member;
+        attachRemoteStream(member.user_id, peer, latestMember);
+        if (peer.pc.connectionState === "failed") {
+            createRtcOffer(peer, latestMember, state.room, true);
+        }
+        if (peer.pc.connectionState === "disconnected") {
+            window.setTimeout(() => {
+                if (state.rtc.peers[member.user_id] === peer && state.room?.is_live) {
+                    createRtcOffer(peer, latestMember, state.room, true);
+                }
+            }, 900);
         }
     };
 
     peer.pc.onnegotiationneeded = async () => {
-        try {
-            peer.makingOffer = true;
-            await syncPeerTracks(peer, state.room);
-            await peer.pc.setLocalDescription();
-            await sendRtcSignal(state.room.id, member.user_id, peer.pc.localDescription.type, peer.pc.localDescription);
-        } catch (error) {
-            console.error(error);
-        } finally {
-            peer.makingOffer = false;
-        }
+        const latestMember = (state.room?.members || []).find((item) => item.user_id === member.user_id) || member;
+        await createRtcOffer(peer, latestMember, state.room);
     };
 
     state.rtc.peers[member.user_id] = peer;
@@ -965,8 +1036,9 @@ async function handleRtcSignal(room, signal) {
         }
         if (description.type === "offer") {
             await syncPeerTracks(peer, room);
-            await peer.pc.setLocalDescription();
-            await sendRtcSignal(room.id, member.user_id, peer.pc.localDescription.type, peer.pc.localDescription);
+            const answer = await peer.pc.createAnswer();
+            await peer.pc.setLocalDescription(answer);
+            await sendRtcSignal(room.id, member.user_id, "answer", peer.pc.localDescription.toJSON ? peer.pc.localDescription.toJSON() : peer.pc.localDescription);
         }
     } catch (error) {
         console.error(error);
@@ -994,7 +1066,7 @@ function startSignalPolling(sessionId) {
     state.rtc.signalAfterId = 0;
     state.rtc.signalPollHandle = setInterval(() => {
         pollRtcSignals(sessionId);
-    }, 1000);
+    }, 600);
     pollRtcSignals(sessionId);
 }
 
@@ -1015,6 +1087,9 @@ async function syncRtcPeers(room) {
         if (peer) {
             await syncPeerTracks(peer, room);
             attachRemoteStream(member.user_id, peer, member);
+            if (shouldInitiatePeer(member) && peer.pc.signalingState === "stable" && !peer.pc.currentRemoteDescription) {
+                await createRtcOffer(peer, member, room);
+            }
         }
     }
 }
@@ -1297,6 +1372,178 @@ async function openRoom(sessionId, focusRoom = true) {
             cleanupRtc();
         }
     }, cfg.poll_ms || 2000);
+}
+
+function renderRoom(room, focusRoom = false) {
+    state.room = room;
+    state.roomId = room.id;
+    renderIdentity();
+    if (focusRoom) setView("room");
+
+    byId("roomTitle").textContent = `${room.subject} Room`;
+    byId("roomMeta").textContent = `${formatSessionDateLabel(room)} | ${room.duration_label} | Host ${room.host_name}`;
+    byId("roomTimer").textContent = room.is_live
+        ? `Ends in ${formatCountdown(room.remaining_seconds)}`
+        : (room.is_upcoming ? `Starts in ${formatCountdown(room.remaining_seconds)}` : "Ended");
+
+    const banner = byId("roomBanner");
+    banner.textContent = room.is_live
+        ? "Session active. Camera, mic, and screen-share controls are live on this portal."
+        : (room.is_upcoming ? "Session created. Join becomes available only when system time reaches the start time." : (room.end_note || "Session expired."));
+    banner.className = `banner ${room.is_active ? "active-banner" : "expired-banner"}`;
+
+    const endButton = byId("endSessionButton");
+    endButton.style.display = room.viewer?.is_host ? "inline-flex" : "none";
+    endButton.disabled = !room.is_active;
+    const leaveButton = byId("roomLeaveButton");
+    leaveButton.style.display = room.viewer?.is_host ? "none" : "inline-flex";
+    leaveButton.disabled = !room.is_active;
+    updateFeedbackTarget(room);
+
+    const micLabel = !room.viewer?.mic_allowed ? "Mic Blocked" : (room.viewer?.mic_on ? "Mic On" : "Mic Off");
+    const cameraLabel = !room.viewer?.camera_allowed ? "Camera Blocked" : (room.viewer?.camera_on ? "Camera On" : "Camera Off");
+    const screenLabel = room.viewer?.screen_sharing ? "Stop Share" : "Share Screen";
+
+    byId("selfControls").innerHTML = `
+        <button class="chip portal-chip ${room.viewer?.mic_on && room.viewer?.mic_allowed ? "active" : ""}" type="button" data-self="mic" ${room.is_live ? "" : "disabled"}>
+            ${micLabel}
+        </button>
+        <button class="chip portal-chip ${room.viewer?.camera_on && room.viewer?.camera_allowed ? "active" : ""}" type="button" data-self="camera" ${room.is_live ? "" : "disabled"}>
+            ${cameraLabel}
+        </button>
+        <button class="chip portal-chip ${room.viewer?.screen_sharing ? "active" : ""}" type="button" data-self="screen" ${room.is_live ? "" : "disabled"}>
+            ${screenLabel}
+        </button>
+        <button class="chip portal-chip ${room.viewer?.hand_up ? "active" : ""}" type="button" data-self="hand" ${room.is_live ? "" : "disabled"}>
+            ${room.viewer?.hand_up ? "\u270B Hand Up" : "\u270B Raise Hand"}
+        </button>
+        <span class="mic-meter ${room.viewer?.mic_on && room.viewer?.mic_allowed && room.is_live ? "active" : ""}" id="micMeter">Mic Signal</span>
+    `;
+
+    byId("participants").innerHTML = room.members.map((member) => {
+        const initials = member.display_name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase();
+        const isSelf = member.user_id === state.user?.id;
+        const liveCamera = isSelf && member.camera_on && member.camera_allowed && room.is_live && !member.screen_sharing;
+        const liveScreen = isSelf && member.screen_sharing && room.is_live;
+        const screenMarkup = isSelf ? `
+            <div class="participant-screen self-screen ${liveCamera || liveScreen ? "is-live" : ""}">
+                <video id="screenPreview" class="local-preview ${liveScreen ? "" : "hidden-preview"}" autoplay muted playsinline></video>
+                <video id="localPreview" class="local-preview ${liveCamera ? "" : "hidden-preview"}" autoplay muted playsinline></video>
+                <div class="screen-fallback ${liveCamera || liveScreen ? "hidden" : ""}">
+                    <strong>${escapeHtml(initials)}</strong>
+                    <span>${escapeHtml(member.display_name)}</span>
+                </div>
+                <div class="screen-status" id="localPreviewState">${liveScreen ? "Live screen share" : (liveCamera ? "Live camera preview" : (member.camera_allowed ? "Camera is off" : "Camera disabled by host"))}</div>
+            </div>
+        ` : `
+            <div class="participant-screen">
+                <video id="${remoteVideoId(member.user_id)}" class="local-preview hidden-preview" autoplay muted playsinline></video>
+                <audio id="${remoteAudioId(member.user_id)}" autoplay playsinline></audio>
+                <div class="screen-fallback" id="${remoteFallbackId(member.user_id)}">
+                    <strong>${escapeHtml(initials)}</strong>
+                    <span>${escapeHtml(member.display_name)}</span>
+                </div>
+                <div class="screen-status" id="${remoteStatusId(member.user_id)}">${member.screen_sharing ? "Waiting for shared screen" : (member.camera_on || member.mic_on ? "Waiting for live feed" : "Camera and mic are off")}</div>
+            </div>
+        `;
+
+        const hostTools = room.viewer?.is_host && !member.is_host && room.is_live ? `
+            <div class="chip-row">
+                <button class="chip portal-chip" type="button" data-host="mute" data-user="${member.user_id}">Mute</button>
+                <button class="chip portal-chip" type="button" data-host="unmute" data-user="${member.user_id}">Unmute</button>
+                <button class="chip portal-chip" type="button" data-host="disable_mic" data-user="${member.user_id}">Disable Mic</button>
+                <button class="chip portal-chip" type="button" data-host="enable_mic" data-user="${member.user_id}">Enable Mic</button>
+                <button class="chip portal-chip" type="button" data-host="disable_camera" data-user="${member.user_id}">Disable Cam</button>
+                <button class="chip portal-chip" type="button" data-host="enable_camera" data-user="${member.user_id}">Enable Cam</button>
+                <button class="chip portal-chip danger-chip" type="button" data-host="kick" data-user="${member.user_id}">Kick</button>
+            </div>
+        ` : "";
+
+        const feedbackTools = !isSelf ? `
+            <div class="chip-row participant-action-row">
+                <button class="chip portal-chip" type="button" data-profile-open="${member.user_id}">View Profile</button>
+                <button class="chip portal-chip" type="button" data-feedback-open="${member.user_id}">Review / Report</button>
+            </div>
+        ` : `
+            <div class="chip-row participant-action-row">
+                <button class="chip portal-chip" type="button" data-profile-open="${member.user_id}">View My Profile</button>
+            </div>
+        `;
+
+        return `
+            <article class="participant-card ${isSelf ? "self-card" : ""}">
+                ${screenMarkup}
+                <div class="chip-row">
+                    ${member.is_host ? '<span class="chip active">Host</span>' : ""}
+                    ${isSelf ? '<span class="chip accent-chip">You</span>' : ""}
+                    ${member.screen_sharing ? '<span class="chip accent-chip">Sharing Screen</span>' : ""}
+                    <span class="chip">${member.mic_on ? "Mic On" : "Mic Off"}</span>
+                    <span class="chip">${member.camera_on ? "Cam On" : "Cam Off"}</span>
+                    <span class="chip">${member.hand_up ? "\u270B Hand Up" : "\u270B Hand Down"}</span>
+                    <span class="chip">${member.mic_allowed ? "Mic Enabled" : "Mic Locked"}</span>
+                    <span class="chip">${member.camera_allowed ? "Cam Enabled" : "Cam Locked"}</span>
+                    <span class="chip">${escapeHtml(member.role)}</span>
+                    <span class="chip accent-chip">${escapeHtml(member.review_count ? `${Number(member.average_rating || 0).toFixed(1)} stars` : "No rating yet")}</span>
+                    <span class="chip">${escapeHtml(`${member.review_count || 0} reviews`)}</span>
+                    <span class="chip">${escapeHtml(`${member.report_count || 0} reports`)}</span>
+                </div>
+                ${feedbackTools}
+                ${hostTools}
+            </article>
+        `;
+    }).join("");
+
+    byId("messages").innerHTML = room.messages.length
+        ? room.messages.map((message) => `
+            <div class="message">
+                <strong>${escapeHtml(message.sender_name)}</strong>
+                <div>${escapeHtml(message.body)}</div>
+                <time>${escapeHtml(formatMessageTime(message.created_at))}</time>
+            </div>
+        `).join("")
+        : '<div class="banner info-banner">No messages yet.</div>';
+
+    const messages = byId("messages");
+    if (messages) messages.scrollTop = messages.scrollHeight;
+
+    syncLocalMedia(room);
+    Object.values(state.rtc.peers).forEach((peer) => {
+        const latestMember = (room.members || []).find((item) => item.user_id === peer.userId);
+        if (latestMember) attachRemoteStream(peer.userId, peer, latestMember);
+    });
+}
+
+async function openRoom(sessionId, focusRoom = true) {
+    const data = await api(`/api/sessions/${sessionId}/room`);
+    cleanupRtc();
+    renderRoom(data.room, focusRoom);
+    stopPolling();
+    startSignalPolling(sessionId);
+    state.pollHandle = setInterval(async () => {
+        try {
+            const fresh = await api(`/api/sessions/${sessionId}/room`);
+            renderRoom(fresh.room, false);
+        } catch (error) {
+            stopPolling();
+            cleanupRtc();
+            releaseLocalMedia();
+            state.room = null;
+            state.roomId = null;
+            try {
+                await bootstrap();
+            } catch (bootstrapError) {
+                console.error(bootstrapError);
+            }
+            setView("mine");
+            alertBox(
+                "appAlert",
+                /join the session first/i.test(error.message || "")
+                    ? "You were removed from this live session."
+                    : (error.message || "Live room connection was lost."),
+                "error",
+            );
+        }
+    }, cfg.poll_ms || 1000);
 }
 
 function authPayload(form, bucket) {
@@ -1665,6 +1912,8 @@ document.addEventListener("DOMContentLoaded", async () => {
         stopPolling();
         cleanupRtc();
     });
+    document.addEventListener("pointerdown", resumeRemoteMediaPlayback);
+    document.addEventListener("keydown", resumeRemoteMediaPlayback);
 
     byId("matchNowButton")?.addEventListener("click", runMatchRadar);
     byId("sessionForm")?.session_date?.addEventListener("input", updateSchedulePreview);
