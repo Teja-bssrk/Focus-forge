@@ -849,27 +849,17 @@ async function getOutgoingTracks(room) {
 
 async function syncPeerTracks(peer, room) {
     const { audioTrack, videoTrack } = await getOutgoingTracks(room);
-    const senders = peer.pc.getSenders();
-    const audioSender = senders.find((sender) => sender.track?.kind === "audio" || sender.__kind === "audio");
-    const videoSender = senders.find((sender) => sender.track?.kind === "video" || sender.__kind === "video");
+    const audioSender = peer.audioSender || peer.pc.getSenders().find((sender) => sender.track?.kind === "audio" || sender.__kind === "audio");
+    const videoSender = peer.videoSender || peer.pc.getSenders().find((sender) => sender.track?.kind === "video" || sender.__kind === "video");
 
     if (audioTrack) {
         if (audioSender) await audioSender.replaceTrack(audioTrack);
-        else {
-            const sender = peer.pc.addTrack(audioTrack, state.media.stream);
-            sender.__kind = "audio";
-        }
     } else if (audioSender) {
         await audioSender.replaceTrack(null);
     }
 
-    const videoSourceStream = state.media.screenStream || state.media.stream;
     if (videoTrack) {
         if (videoSender) await videoSender.replaceTrack(videoTrack);
-        else {
-            const sender = peer.pc.addTrack(videoTrack, videoSourceStream);
-            sender.__kind = "video";
-        }
     } else if (videoSender) {
         await videoSender.replaceTrack(null);
     }
@@ -884,9 +874,17 @@ function ensureRtcPeer(room, member) {
         polite: state.user.id > member.user_id,
         makingOffer: false,
         ignoreOffer: false,
+        pendingCandidates: [],
         stream: new MediaStream(),
         pc: new RTCPeerConnection(RTC_CONFIG),
     };
+
+    const audioTransceiver = peer.pc.addTransceiver("audio", { direction: "sendrecv" });
+    const videoTransceiver = peer.pc.addTransceiver("video", { direction: "sendrecv" });
+    audioTransceiver.sender.__kind = "audio";
+    videoTransceiver.sender.__kind = "video";
+    peer.audioSender = audioTransceiver.sender;
+    peer.videoSender = videoTransceiver.sender;
 
     peer.pc.ontrack = (event) => {
         event.streams[0].getTracks().forEach((track) => {
@@ -936,6 +934,10 @@ async function handleRtcSignal(room, signal) {
 
     if (signal.signal_type === "candidate") {
         if (!signal.payload || peer.ignoreOffer) return;
+        if (!peer.pc.remoteDescription || !peer.pc.remoteDescription.type) {
+            peer.pendingCandidates.push(signal.payload);
+            return;
+        }
         try {
             await peer.pc.addIceCandidate(signal.payload);
         } catch (error) {
@@ -952,6 +954,15 @@ async function handleRtcSignal(room, signal) {
 
     try {
         await peer.pc.setRemoteDescription(description);
+        while (peer.pendingCandidates.length) {
+            const candidate = peer.pendingCandidates.shift();
+            if (!candidate) continue;
+            try {
+                await peer.pc.addIceCandidate(candidate);
+            } catch (error) {
+                console.error(error);
+            }
+        }
         if (description.type === "offer") {
             await syncPeerTracks(peer, room);
             await peer.pc.setLocalDescription();
@@ -1079,6 +1090,18 @@ async function syncLocalMedia(room) {
     }
 
     if (!stream) {
+        if ((cameraEnabled || micEnabled) && room?.id) {
+            try {
+                const data = await api(`/api/sessions/${room.id}/room/self`, {
+                    method: "POST",
+                    data: { camera_on: false, mic_on: false },
+                });
+                renderRoom(data.room, state.activeView === "room");
+                return;
+            } catch (error) {
+                console.error(error);
+            }
+        }
         if (previewState) {
             previewState.textContent = room.viewer.camera_allowed ? (state.media.error || "Camera preview unavailable.") : "Camera disabled by host";
         }
